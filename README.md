@@ -101,7 +101,7 @@ sudo ./Kali_LLM.sh
 Option `[3]` supports:
 
 1. **Pull from the Ollama library** (recommended) — Tools-capable models:
-   - `qwen2.5:7b`, `qwen2.5:3b`, `mistral-nemo`
+   - `qwen3.5:4b`, `qwen3.5:9b`, `ornith:9b` `lfm2.5:8b`
    - `llama3.1:8b`, `llama3.2:3b`, `qwen3:4b` *(from the official guide)*
 2. **Build from Hugging Face (GGUF)** — enter the `repo`, `filename.gguf`, and a model name, with automatic `mmproj` vision-projector detection.
 3. **List installed models** + disk usage.
