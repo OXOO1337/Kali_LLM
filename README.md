@@ -4,7 +4,7 @@
 > Run and manage local LLMs entirely on Kali Linux — fully offline, no cloud services.
 
 <p align="center">
-  <img src="img/Kali_LLM.png" alt="Kali LLM Installer — Main Menu" width="700">
+  <img src="img/Kali_LLM0.png" alt="Kali LLM Installer — Main Menu" width="700">
   <br><em>The script's main interface (live status dashboard + menu)</em>
 </p>
 
