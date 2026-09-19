@@ -39,8 +39,8 @@ print_banner() {
     clear
     echo -e "${CYAN}${BOLD}"
     echo "╔════════════════════════════════════════════════════════════════╗"
-    echo "║          🦾 KALI LINUX LOCAL LLM INSTALLER 🦾                  ║"
-    echo "║    Ollama + 5ire + MCP Server + NVIDIA GPU Optimized           ║"
+    echo "║            🦾 KALI LINUX LOCAL LLM INSTALLER 🦾                ║"
+    echo "║      Ollama + 5ire + MCP Server + NVIDIA GPU Optimized         ║"
     echo "╠════════════════════════════════════════════════════════════════╣"
     echo -e "║  ${NC}${BLUE}Developer:${NC} 0X001337                                           ${CYAN}║"
     echo -e "║  ${NC}${BLUE}Version:${NC}   $SCRIPT_VERSION                                               ${CYAN}║"
@@ -63,7 +63,7 @@ print_banner() {
         local gpu_name=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -n 1)
         local gpu_vram=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -n 1)
         echo -e "║  ${NC}${BOLD}GPU:${NC}   ${gpu_name:-Unknown}                                ${CYAN}║"
-        echo -e "║  ${NC}${BOLD}VRAM:${NC}  ${gpu_vram:-Unknown} MiB                                           ${CYAN}║"
+        echo -e "║  ${NC}${BOLD}VRAM:${NC}  ${gpu_vram:-Unknown} MiB                                               ${CYAN}║"
     else
         echo -e "║  ${NC}${BOLD}GPU:${NC}   No NVIDIA GPU Detected (CPU Mode)                    ${CYAN}║"
         echo -e "║  ${NC}${BOLD}VRAM:${NC}  N/A                                                ${CYAN}║"
@@ -285,7 +285,7 @@ download_models() {
     while true; do
         clear; print_banner
         echo -e "${CYAN}┌─────────────────────────────────────────────────────────────┐${NC}"
-        echo -e "${CYAN}│${BOLD}  MODEL MANAGEMENT                                           ${CYAN}│${NC}"
+        echo -e "${CYAN}│${BOLD}                      MODEL MANAGEMENT                       ${CYAN}│${NC}"
         echo -e "${CYAN}├─────────────────────────────────────────────────────────────┤${NC}"
         echo -e "${CYAN}│${NC}  ${GREEN}[1]${NC} Download from Ollama Library (Recommended)             ${CYAN}│${NC}"
         echo -e "${CYAN}│${NC}  ${GREEN}[2]${NC} Download from Hugging Face GGUF (Advanced)             ${CYAN}│${NC}"
@@ -314,9 +314,10 @@ download_from_ollama() {
     echo -e "${CYAN}https://ollama.com/library${NC}"
     echo ""
     echo -e "${YELLOW}Examples (Tools-capable models):${NC}"
-    echo "  • qwen2.5:7b         (Tools model, ~4.7GB)"
-    echo "  • qwen2.5:3b         (Tools model, ~1.9GB)"
-    echo "  • mistral-nemo       (Tools model, ~7.1GB)"
+    echo "  • qwen3.5:4b         (Tools model, ~3.4GB)"
+    echo "  • qwen3.5:9b         (Tools model, ~6.6GB)"
+    echo "  • ornith:9b          (Tools model, ~5.6GB)"
+    echo "  • lfm2.5:8b          (Tools model, ~5.2GB)"
     echo "  • llama3.1:8b        (Tools model, ~4.9GB)  [Kali guide]"
     echo "  • llama3.2:3b        (Tools model, ~2.0GB)  [Kali guide]"
     echo "  • qwen3:4b           (Tools model, ~2.5GB)  [Kali guide]"
@@ -355,7 +356,7 @@ download_from_huggingface() {
     echo -e "${BLUE}Browse GGUF models at: https://huggingface.co/models?library=gguf${NC}"
     echo ""
     echo -e "${YELLOW}⚠️  IMPORTANT NOTES:${NC}"
-    echo "  • Repo format: 'organization/model-name' (e.g., Qwen/Qwen3-VL-8B-Thinking-GGUF)"
+    echo "  • Repo format: 'organization/model-name' (e.g., Qwen/Qwen3-4B-GGUF)"
     echo "  • Filename must end with .gguf"
     echo "  • For vision models, mmproj file will be auto-detected"
     echo ""
@@ -696,7 +697,7 @@ update_tools() {
 # ==============================================================================
 show_service_status() {
     echo -e "${CYAN}┌─────────────────────────────────────────────────────────────┐${NC}"
-    echo -e "${CYAN}│${BOLD}  SERVICE STATUS                                              ${CYAN}│${NC}"
+    echo -e "${CYAN}│${BOLD}                      SERVICE STATUS                         ${CYAN}│${NC}"
     echo -e "${CYAN}└─────────────────────────────────────────────────────────────┘${NC}"
 
     # MCP Flask API (systemd)
@@ -736,9 +737,9 @@ manage_services() {
         print_step "Service Management"
         show_service_status
         echo -e "${CYAN}┌─────────────────────────────────────────────────────────────┐${NC}"
-        echo -e "${CYAN}│${NC}  ${GREEN}[1]${NC} Start MCP API        ${GREEN}[2]${NC} Stop MCP API                ${CYAN}│${NC}"
-        echo -e "${CYAN}│${NC}  ${GREEN}[3]${NC} Restart MCP API      ${GREEN}[4]${NC} MCP API logs (last 30)      ${CYAN}│${NC}"
-        echo -e "${CYAN}│${NC}  ${GREEN}[5]${NC} Start Ollama         ${GREEN}[6]${NC} Stop Ollama                 ${CYAN}│${NC}"
+        echo -e "${CYAN}│${NC}  ${GREEN}[1]${NC} Start MCP API          ${GREEN}[2]${NC} Stop MCP API                ${CYAN}│${NC}"
+        echo -e "${CYAN}│${NC}  ${GREEN}[3]${NC} Restart MCP API        ${GREEN}[4]${NC} MCP API logs (last 30)      ${CYAN}│${NC}"
+        echo -e "${CYAN}│${NC}  ${GREEN}[5]${NC} Start Ollama           ${GREEN}[6]${NC} Stop Ollama                 ${CYAN}│${NC}"
         echo -e "${CYAN}│${NC}  ${RED}[0]${NC} Back to Main Menu                                      ${CYAN}│${NC}"
         echo -e "${CYAN}└─────────────────────────────────────────────────────────────┘${NC}"
         echo ""
@@ -772,7 +773,7 @@ main_menu() {
     while true; do
         clear; print_banner
         echo -e "${CYAN}┌─────────────────────────────────────────────────────────────┐${NC}"
-        echo -e "${CYAN}│${BOLD}                    MAIN MENU                                ${CYAN}│${NC}"
+        echo -e "${CYAN}│${BOLD}                         MAIN MENU                           ${CYAN}│${NC}"
         echo -e "${CYAN}├─────────────────────────────────────────────────────────────┤${NC}"
         echo -e "${CYAN}│${NC}  ${GREEN}[1]${NC} Prepare Workspace (/srv)                               ${CYAN}│${NC}"
         echo -e "${CYAN}│${NC}  ${GREEN}[2]${NC} Install Ollama                                         ${CYAN}│${NC}"
