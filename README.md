@@ -4,7 +4,7 @@
 > Run and manage local LLMs entirely on Kali Linux — fully offline, no cloud services.
 
 <p align="center">
-  <img src="img/Kali_LLM0.png" alt="Kali LLM Installer — Main Menu" width="700">
+  <img src="img/Kali_LLM.png" alt="Kali LLM Installer — Main Menu" width="700">
   <br><em>The script's main interface (live status dashboard + menu)</em>
 </p>
 
@@ -41,9 +41,9 @@ The script brings together:
 
 - 🎛️ **Interactive menu** with a live status dashboard (OS, RAM, GPU, service status, storage usage).
 - 🗂️ **Isolated `/srv` layout** — models and binaries kept away from the base filesystem.
-- 📦 **Full model management** — pull from the Ollama library or build GGUF models from Hugging Face (with automatic `mmproj` vision-projector detection).
-- 🔄 **Unified updates** — system tools + Ollama + 5ire from a single place.
-- ⚙️ **Service management** — start/stop/restart and view logs for the `MCP API` and `Ollama`.
+- 📦 **Full model management** — pull from the Ollama library, or build GGUF models from Hugging Face via a submenu: one-click **Qwen3.5-4B / 9B presets**, a **quantization chooser** (Q4_K_M → BF16), a **template / tool-engine selector** (Auto · ChatML · Llama 3 · **built-in RENDERER/PARSER** for modern archs like Qwen3.5), and automatic `mmproj` vision-projector detection.
+- 🧰 **Maintenance menu** — one place for updates, service control, and the MCP repair.
+- 🩹 **MCP server repair** — auto-fixes a bug in the Kali `mcp-kali-server` package that breaks every tool endpoint (see [MCP Server Repair](#-mcp-server-repair)).
 - 🛡️ **Safe input** — sanitization and strict allow-lists to prevent command injection.
 - 🖥️ **NVIDIA GPU support** — detects the card and installs the proprietary (CUDA) drivers.
 - 🧩 **5ire integration** — a smart launcher that auto-starts Ollama + a Kali desktop menu entry.
@@ -81,9 +81,17 @@ sudo ./Kali_LLM.sh
 [3] Download & Manage Models                 Download and manage models
 [4] Install 5ire Application                 Install the 5ire GUI
 [5] Install & Configure MCP Server           Install the MCP server + Kali tools
-[6] Update Tools (System + Ollama + 5ire)    Update all components
-[7] Manage Services (MCP API + Ollama)       Manage services
+[6] Maintenance (Update · Services · Repair) Submenu (see below)
 [0] Exit Script                              Quit
+```
+
+**`[6] Maintenance` submenu:**
+
+```
+[1] Update Tools (System + Ollama + 5ire)    Update all components
+[2] Manage Services (MCP API + Ollama)       Start/stop/restart + logs
+[3] Repair MCP Server (fix tool endpoints)   Patch the Kali package bug (see below)
+[0] Back to Main Menu
 ```
 
 ### Recommended first-run order
@@ -101,13 +109,38 @@ sudo ./Kali_LLM.sh
 Option `[3]` supports:
 
 1. **Pull from the Ollama library** (recommended) — Tools-capable models:
-   - `qwen3.5:4b`, `qwen3.5:9b`, `ornith:9b` `lfm2.5:8b`
+   - `qwen2.5:7b`, `qwen2.5:3b`, `mistral-nemo`
    - `llama3.1:8b`, `llama3.2:3b`, `qwen3:4b` *(from the official guide)*
-2. **Build from Hugging Face (GGUF)** — enter the `repo`, `filename.gguf`, and a model name, with automatic `mmproj` vision-projector detection.
+2. **Build from Hugging Face (GGUF)** — opens a submenu of one-click, tool-capable presets (built-in RENDERER/PARSER) plus a custom builder:
+   - `[1] Qwen3.5-4B` — `unsloth/Qwen3.5-4B-GGUF` · engine `qwen3.5` · ~6 GB VRAM · Ollama ≥ 0.17.1
+   - `[2] Qwen3.5-9B` — `unsloth/Qwen3.5-9B-GGUF` · engine `qwen3.5` · 8 GB+ VRAM · Ollama ≥ 0.17.1
+   - `[3] Ornith-1.0-9B` — `ornith-ai/Ornith-1.0-9B-GGUF` · engine `ornith` · 8 GB+ VRAM · Ollama ≥ 0.30.11
+   - `[4] LFM2.5-8B-A1B` — `unsloth/LFM2.5-8B-A1B-GGUF` · MoE · engine `lfm2` / parser `lfm2-thinking` · Ollama ≥ 0.30.0
+   - `[5] Custom` — enter any `repo`, `filename.gguf`, and model name, pick a template/engine, with automatic `mmproj` vision-projector detection
+
+   The presets and custom builds both let you choose:
+   - **Quantization** — `Q4_K_M` (default) · `Q5_K_M` · `Q6_K` · `Q8_0` · `Q3_K_M` · `BF16`
+   - **Template / tool engine**:
+     - `[1] Auto` — Ollama picks from the GGUF (chat; tools only if embedded)
+     - `[2] ChatML` — tool-capable, for **older** families (Qwen2.5 / Qwen3 ChatML GGUFs)
+     - `[3] Llama 3` — tool-capable (Llama 3.1 / 3.2)
+     - `[4] None` — text-only
+     - `[5] Built-in RENDERER/PARSER` — for **modern** archs (Qwen3.5, DeepSeek, GLM, Gemma4…); prompts for the name (e.g. `qwen3.5`). Needs Ollama ≥ 0.17.1.
+
+   > ⚠️ **Tool-calling depends on the runtime, not just the model.** See [How tool-calling works](#-how-tool-calling-works-important) below. For **Qwen3.5** choose option `[5]` and enter `qwen3.5` (the Qwen3.5 presets do this automatically).
 3. **List installed models** + disk usage.
 4. **Remove a model**.
 
-> ⚠️ You must choose a model that supports **Tools** so it can invoke MCP tools.
+### 🧠 How tool-calling works (important)
+
+Ollama exposes tools to 5ire in one of two ways — it does **not** use the GGUF's Jinja template for this:
+
+| Model family | What to pick | Why |
+|---|---|---|
+| **Qwen2.5, Llama 3.1/3.2** (older) | `ChatML` / `Llama 3` | Ollama reads a Go **TEMPLATE** containing `.Tools` |
+| **Qwen3.5, Ornith, LFM2.5, DeepSeek, GLM** (modern) | **`[5]` Built-in RENDERER/PARSER** | Tool rendering + parsing are compiled **into Ollama** (a `RENDERER`/`PARSER` pair), not a template |
+
+Importing a raw GGUF does **not** auto-apply the built-in renderer/parser ([ollama/ollama#17636](https://github.com/ollama/ollama/issues/17636)) — the model may even show `tools` in `ollama show` yet still fail to call them (Ollama can't parse the reply back). The script fixes this by writing `RENDERER <name>` + `PARSER <name>` into the Modelfile. The renderer and parser names are family-specific and **can differ** (e.g. LFM2.5 = renderer `lfm2`, parser `lfm2-thinking`); the custom builder asks for both. Verify with `ollama show <model>` (a working import shows a `requires <ver>` line) and by watching the MCP log for `POST /api/tools/... 200`.
 
 ---
 
@@ -155,13 +188,43 @@ The model invokes the `nmap` tool via MCP and returns the results — **all loca
 
 ---
 
-## ⚙️ Service Management (Option `[7]`)
+## ⚙️ Service Management (Maintenance `[6] → [2]`)
 
 | Command | Function |
 |---|---|
 | Start / Stop / Restart MCP API | Control the `kali-mcp-api.service` (port 5000) |
 | MCP API logs | Last 30 lines from `journalctl` |
 | Start / Stop Ollama | Control the Ollama server (port 11434) |
+
+---
+
+## 🩹 MCP Server Repair
+
+Run from **Maintenance `[6] → [3]`** (also applied automatically during install `[5]` and re-applied after updates).
+
+Kali's `mcp-kali-server` package ships a broken `remove-shell-true` patch that **breaks every tool endpoint** (`/api/tools/nmap`, `dirb`, `gobuster`, ...). This is why the chat works but **tool-calling fails**.
+
+**Root cause** (verified against the [Kali package](https://gitlab.com/kalilinux/packages/mcp-kali-server) and [upstream](https://github.com/Wh0am123/MCP-Kali-Server)):
+
+1. The patch adds a guard that **rejects non-string commands** (`raise ValueError("CommandExecutor expects a string...")`). But the tool endpoints build the command as an **argv list**, so every one of them returns **HTTP 500**.
+2. It computes `cmd_args = shlex.split(...)` but never uses it — `subprocess.Popen` still runs with `self.command` and `shell=self.use_shell`, so `shell=True` remains active (the patch's own security goal fails).
+
+**Affected package versions** (Kali 2026.x):
+
+| Version | Date | Note |
+|---|---|---|
+| `0.0~git20260119.bffe9f2-0kali3` | 2026-03-12 | Bug introduced (`shell=False` patch) |
+| `0.0~git20260317.00154c0-0kali1` | 2026-03-18 | Patch refreshed (verified buggy) |
+| `0.0~git20260317.00154c0-0kali2` | 2026-08-25 | "Fix the patch" ([bug #9610](https://bugs.kali.org/view.php?id=9610)) — still ships the broken hunk on `kali/master` |
+
+Check your installed version with:
+```bash
+dpkg -s mcp-kali-server | grep -i version
+```
+
+**What the repair does**: rewrites `CommandExecutor.execute()` in `/usr/share/mcp-kali-server/server.py` to accept both a string (via `shlex.split`) and an argv list, and to always run with `shell=False`. It is **idempotent**, keeps a `.bak`, validates the result with `python -c compile` before writing, and restores the backup on any failure.
+
+> The patch is applied automatically during install (option `[5]`) and re-applied after upgrades (Maintenance `[6] → [1]`), since `server.py` is not a dpkg conffile and gets overwritten by package updates. Run Maintenance `[6] → [3]` manually anytime tool endpoints return 500.
 
 ---
 
@@ -175,6 +238,7 @@ The model invokes the `nmap` tool via MCP and returns the results — **all loca
 | `/opt/5ire/5ire.AppImage` | The 5ire application |
 | `/usr/local/bin/5ire` | Smart launcher (starts Ollama, then 5ire) |
 | `/etc/systemd/system/kali-mcp-api.service` | Flask API service for MCP |
+| `/usr/share/mcp-kali-server/server.py` | MCP Flask backend (patched by Maintenance `[6] → [3]`; `.bak` kept) |
 | `/var/log/kali_llm_install.log` | Installation log |
 
 ---
@@ -182,9 +246,12 @@ The model invokes the `nmap` tool via MCP and returns the results — **all loca
 ## 🛠️ Troubleshooting
 
 - **MCP API fails to start**: `journalctl -u kali-mcp-api.service -e`
-- **Ollama not responding**: check `/tmp/ollama.log`, or restart it from option `[7]`.
+- **Ollama not responding**: check `/tmp/ollama.log`, or restart it from Maintenance `[6] → [2]`.
 - **NVIDIA drivers**: reboot after installation, then verify with `nvidia-smi`.
 - **5ire won't launch**: the launcher uses `--appimage-extract-and-run`; ensure `libfuse2t64` is installed.
+- **Chat works but tool-calling / MCP does nothing** — two possible causes:
+  1. **Server side**: the Kali `mcp-kali-server` package bug (tool endpoints return HTTP 500). Run **Maintenance `[6] → [3]` Repair MCP Server** — see [MCP Server Repair](#-mcp-server-repair).
+  2. **Model side** (HF GGUF models): the model was imported without a working tool engine. For **Qwen3.5 and other modern archs**, re-import via `[3] → [2]` and pick template **`[5]` Built-in RENDERER/PARSER** (enter `qwen3.5`); for older families pick `ChatML` / `Llama 3`. Then verify: `ollama show <model>` lists `tools` (a Qwen3.5 import also shows `requires 0.17.1`), and the MCP log shows `POST /api/tools/... 200`. See [How tool-calling works](#-how-tool-calling-works-important).
 
 ---
 

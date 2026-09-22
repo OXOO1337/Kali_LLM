@@ -133,6 +133,17 @@ valid_model_ref() {
     [[ "$1" =~ ^[a-zA-Z0-9][a-zA-Z0-9._:/-]*$ ]]
 }
 
+# --- Ollama version gate: succeeds when installed ollama >= $1 (e.g. 0.17.1) ---
+# Newer architectures (e.g. qwen35) ship their tool renderer/parser INSIDE Ollama
+# and declare a minimum version, so importing/pulling them needs a recent Ollama.
+ollama_version_at_least() {
+    local need="$1" have
+    have=$(ollama --version 2>/dev/null | grep -oE '[0-9]+(\.[0-9]+)+' | head -n 1)
+    [ -z "$have" ] && return 1
+    # have >= need  <=>  the smaller of {need,have} sorts to 'need'
+    [ "$(printf '%s\n%s\n' "$need" "$have" | sort -V | head -n 1)" = "$need" ]
+}
+
 # ==============================================================================
 # CRITICAL HELPER: Ensure Ollama Server is Running
 # ==============================================================================
@@ -350,25 +361,322 @@ download_from_ollama() {
     read_input "${CYAN}Press Enter to continue... ${NC}" dummy
 }
 
-download_from_huggingface() {
+# ---------- Shared: append a tool-capable TEMPLATE to ./Modelfile ----------
+# Usage: hf_write_template <chatml|llama3|none|auto>
+hf_write_template() {
+    case "$1" in
+        chatml)
+            # Official Ollama Qwen2.5 template with tool-calling support.
+            cat >> Modelfile << 'TEOF'
+PARAMETER stop "<|im_start|>"
+PARAMETER stop "<|im_end|>"
+TEMPLATE """{{- if .Messages }}
+{{- if or .System .Tools }}<|im_start|>system
+{{- if .System }}
+{{ .System }}
+{{- end }}
+{{- if .Tools }}
+
+# Tools
+
+You may call one or more functions to assist with the user query.
+
+You are provided with function signatures within <tools></tools> XML tags:
+<tools>
+{{- range .Tools }}
+{"type": "function", "function": {{ .Function }}}
+{{- end }}
+</tools>
+
+For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
+<tool_call>
+{"name": <function-name>, "arguments": <args-json-object>}
+</tool_call>
+{{- end }}<|im_end|>
+{{ end }}
+{{- range $i, $_ := .Messages }}
+{{- $last := eq (len (slice $.Messages $i)) 1 -}}
+{{- if eq .Role "user" }}<|im_start|>user
+{{ .Content }}<|im_end|>
+{{ else if eq .Role "assistant" }}<|im_start|>assistant
+{{ if .Content }}{{ .Content }}
+{{- else if .ToolCalls }}<tool_call>
+{{ range .ToolCalls }}{"name": "{{ .Function.Name }}", "arguments": {{ .Function.Arguments }}}
+{{ end }}</tool_call>
+{{- end }}{{ if not $last }}<|im_end|>
+{{ end }}
+{{- else if eq .Role "tool" }}<|im_start|>user
+<tool_response>
+{{ .Content }}
+</tool_response><|im_end|>
+{{ end }}
+{{- if and (ne .Role "assistant") $last }}<|im_start|>assistant
+{{ end }}
+{{- end }}
+{{- else }}
+{{- if .System }}<|im_start|>system
+{{ .System }}<|im_end|>
+{{ end }}{{ if .Prompt }}<|im_start|>user
+{{ .Prompt }}<|im_end|>
+{{ end }}<|im_start|>assistant
+{{ end }}{{ .Response }}{{ if .Response }}<|im_end|>{{ end }}"""
+TEOF
+            print_success "Using ChatML/Qwen tool-capable template"
+            ;;
+        llama3)
+            # Official Ollama Llama 3.1 template with tool-calling support.
+            cat >> Modelfile << 'TEOF'
+PARAMETER stop "<|start_header_id|>"
+PARAMETER stop "<|end_header_id|>"
+PARAMETER stop "<|eot_id|>"
+TEMPLATE """{{- if or .System .Tools }}<|start_header_id|>system<|end_header_id|>
+{{- if .System }}
+
+{{ .System }}
+{{- end }}
+{{- if .Tools }}
+
+Cutting Knowledge Date: December 2023
+
+When you receive a tool call response, use the output to format an answer to the original user question.
+
+You are a helpful assistant with tool calling capabilities.
+{{- end }}<|eot_id|>
+{{- end }}
+{{- range $i, $_ := .Messages }}
+{{- $last := eq (len (slice $.Messages $i)) 1 }}
+{{- if eq .Role "user" }}<|start_header_id|>user<|end_header_id|>
+{{- if and $.Tools $last }}
+
+Given the following functions, please respond with a JSON for a function call with its proper arguments that best answers the given prompt.
+
+Respond in the format {"name": function name, "parameters": dictionary of argument name and its value}. Do not use variables.
+
+{{ range $.Tools }}
+{{- . }}
+{{ end }}
+{{ .Content }}<|eot_id|>
+{{- else }}
+
+{{ .Content }}<|eot_id|>
+{{- end }}{{ if $last }}<|start_header_id|>assistant<|end_header_id|>
+
+{{ end }}
+{{- else if eq .Role "assistant" }}<|start_header_id|>assistant<|end_header_id|>
+{{- if .ToolCalls }}
+{{ range .ToolCalls }}
+{"name": "{{ .Function.Name }}", "parameters": {{ .Function.Arguments }}}{{ end }}
+{{- else }}
+
+{{ .Content }}
+{{- end }}{{ if not $last }}<|eot_id|>{{ end }}
+{{- else if eq .Role "tool" }}<|start_header_id|>ipython<|end_header_id|>
+
+{{ .Content }}<|eot_id|>{{ if $last }}<|start_header_id|>assistant<|end_header_id|>
+
+{{ end }}
+{{- end }}
+{{- end }}"""
+TEOF
+            print_success "Using Llama 3.x tool-capable template"
+            ;;
+        renderer:*)
+            # Modern archs (Qwen3.5, Ornith, LFM2.5, DeepSeek, GLM...) ship their tool-calling
+            # RENDERER + PARSER inside Ollama. `ollama create` from a raw GGUF does NOT
+            # apply them automatically (ollama/ollama#17636), so we set them explicitly.
+            # This is what makes tool-calling actually work — not a text TEMPLATE.
+            # Arg form: "renderer:<name>" (same for both) or "renderer:<render>,<parser>"
+            # (some models differ, e.g. LFM2.5 = lfm2 / lfm2-thinking).
+            local spec="${1#renderer:}" rname pname
+            rname="${spec%%,*}"
+            if [[ "$spec" == *,* ]]; then pname="${spec#*,}"; else pname="$rname"; fi
+            {
+                echo "RENDERER $rname"
+                echo "PARSER $pname"
+            } >> Modelfile
+            print_success "Using Ollama built-in renderer '$rname' + parser '$pname'"
+            ;;
+        none)
+            print_warn "No template set (text-only model)"
+            ;;
+        *)
+            print_info "Using the GGUF's embedded template (Auto)"
+            ;;
+    esac
+}
+
+# ---------- Core builder: download GGUF, build Modelfile, create Ollama model ----------
+# Usage: hf_build_model <repo> <gguf_file> <ollama_name> <tmpl> <detect_mmproj:yes|no>
+hf_build_model() {
+    local hf_repo="$1" hf_file="$2" ollama_name="$3" tmpl="$4" detect_mmproj="$5"
+
+    mkdir -p "$MODELS_TEMP"
+    cd "$MODELS_TEMP" || { print_error "Cannot access $MODELS_TEMP (run option [1] first)"; return 1; }
+
+    print_info "Downloading GGUF: $hf_file ..."
+    if ! wget -q --show-progress "https://huggingface.co/$hf_repo/resolve/main/$hf_file"; then
+        print_error "Download failed. Verify the repo and filename exist."
+        log "ERROR" "HF download failed: $hf_repo/$hf_file"
+        return 1
+    fi
+
+    local mmproj_file=""
+    if [ "$detect_mmproj" = "yes" ]; then
+        local base_name="${hf_file%.gguf}"
+        print_info "Checking for vision projector (mmproj)..."
+        for candidate in "mmproj-${base_name}.gguf" "mmproj-${base_name}-f16.gguf" "mmproj-${base_name}-F16.gguf" "mmproj-F16.gguf" "mmproj-F32.gguf" "mmproj-BF16.gguf" "mmproj-model-f16.gguf"; do
+            # -L follows HF's redirect to the CDN; match the HTTP/1.x or HTTP/2 200 status line.
+            if curl -sIL "https://huggingface.co/$hf_repo/resolve/main/$candidate" | grep -qiE "^HTTP/.* 200"; then
+                mmproj_file="$candidate"
+                break
+            fi
+        done
+        if [ -n "$mmproj_file" ]; then
+            print_success "Vision projector detected: $mmproj_file"
+            wget -q --show-progress "https://huggingface.co/$hf_repo/resolve/main/$mmproj_file"
+        else
+            print_warn "No mmproj file found (text-only model)"
+        fi
+    fi
+
+    print_info "Generating Modelfile..."
+    {
+        echo "FROM ./$hf_file"
+        [ -n "$mmproj_file" ] && echo "FROM ./$mmproj_file"
+        echo 'PARAMETER num_ctx 4096'
+        if [ "$tmpl" = "renderer:qwen3.5" ]; then
+            # Qwen3.5 (thinking) recommended sampling, matching the official Ollama model.
+            echo 'PARAMETER temperature 1.0'
+            echo 'PARAMETER top_p 0.95'
+            echo 'PARAMETER top_k 20'
+            echo 'PARAMETER presence_penalty 1.5'
+        else
+            echo 'PARAMETER temperature 0.7'
+            echo 'PARAMETER top_p 0.8'
+        fi
+    } > Modelfile
+    hf_write_template "$tmpl"
+
+    ensure_ollama_running || return 1
+
+    print_info "Building model in Ollama as '$ollama_name'..."
+    if su - "$REAL_USER" -c "export OLLAMA_MODELS=$OLLAMA_MODELS_DIR && ollama create $ollama_name -f $MODELS_TEMP/Modelfile"; then
+        print_success "Model '$ollama_name' created successfully"
+        log "INFO" "HF model created: $ollama_name"
+    else
+        print_error "Model build failed. Check Modelfile syntax."
+        log "ERROR" "Model build failed: $ollama_name"
+    fi
+
+    print_info "Cleaning up temporary files..."
+    rm -f "$hf_file" "$mmproj_file" Modelfile
+    return 0
+}
+
+# ---------- Quantization chooser (sets global HF_QUANT; default Q4_K_M) ----------
+hf_choose_quant() {
+    HF_QUANT="Q4_K_M"
+    echo ""
+    echo -e "${YELLOW}Quantization (quality vs size):${NC}"
+    echo -e "  ${GREEN}[1]${NC} Q4_K_M  (default — best balance)"
+    echo -e "  ${GREEN}[2]${NC} Q5_K_M  (higher quality, larger)"
+    echo -e "  ${GREEN}[3]${NC} Q6_K    (near-Q8 quality)"
+    echo -e "  ${GREEN}[4]${NC} Q8_0    (near-lossless, large)"
+    echo -e "  ${GREEN}[5]${NC} Q3_K_M  (smaller, lower quality)"
+    echo -e "  ${GREEN}[6]${NC} BF16    (full precision, very large)"
+    read_input "${CYAN}Choose [1-6] (Enter = Q4_K_M): ${NC}" q
+    case "$q" in
+        ""|1) HF_QUANT="Q4_K_M" ;;
+        2)    HF_QUANT="Q5_K_M" ;;
+        3)    HF_QUANT="Q6_K" ;;
+        4)    HF_QUANT="Q8_0" ;;
+        5)    HF_QUANT="Q3_K_M" ;;
+        6)    HF_QUANT="BF16" ;;
+        *)    print_warn "Invalid choice; using Q4_K_M"; HF_QUANT="Q4_K_M" ;;
+    esac
+}
+
+# ---------- Map a chosen quant to the repo's actual GGUF filename ----------
+# GGUF naming differs per repo (case, UD- prefix, missing quants). Echoes the
+# filename for <key,quant>, or returns 1 if that quant is not published.
+hf_preset_filename() {
+    local key="$1" q="$2"
+    case "$key" in
+        qwen3.5-4b) echo "Qwen3.5-4B-${q}.gguf" ;;
+        qwen3.5-9b) echo "Qwen3.5-9B-${q}.gguf" ;;
+        ornith-9b)
+            case "$q" in
+                Q4_K_M|Q5_K_M|Q6_K|Q8_0) echo "ornith-1.0-9b-${q}.gguf" ;;
+                BF16)                     echo "ornith-1.0-9b-bf16.gguf" ;;
+                *) return 1 ;;   # e.g. Q3_K_M not published for Ornith
+            esac ;;
+        lfm2.5-8b)
+            case "$q" in
+                Q4_K_M|Q5_K_M|Q6_K|Q3_K_M) echo "LFM2.5-8B-A1B-UD-${q}.gguf" ;;
+                Q8_0|BF16)                 echo "LFM2.5-8B-A1B-${q}.gguf" ;;
+                *) return 1 ;;
+            esac ;;
+        *) return 1 ;;
+    esac
+}
+
+# ---------- Preset downloader (tool-capable, built-in RENDERER/PARSER) ----------
+# Each modern arch ships its tool engine inside Ollama; we set RENDERER/PARSER
+# explicitly because `ollama create` from a GGUF does not (ollama/ollama#17636).
+# Usage: download_hf_preset <qwen3.5-4b|qwen3.5-9b|ornith-9b|lfm2.5-8b>
+download_hf_preset() {
+    local key="$1"
+    local repo name rspec minver
+    case "$key" in
+        qwen3.5-4b) repo="unsloth/Qwen3.5-4B-GGUF";      name="qwen3.5-4b";  rspec="qwen3.5";           minver="0.17.1" ;;
+        qwen3.5-9b) repo="unsloth/Qwen3.5-9B-GGUF";      name="qwen3.5-9b";  rspec="qwen3.5";           minver="0.17.1" ;;
+        ornith-9b)  repo="ornith-ai/Ornith-1.0-9B-GGUF"; name="ornith-1.0-9b"; rspec="ornith";          minver="0.30.11" ;;
+        lfm2.5-8b)  repo="unsloth/LFM2.5-8B-A1B-GGUF";   name="lfm2.5-8b";   rspec="lfm2,lfm2-thinking"; minver="0.30.0" ;;
+        *) print_error "Unknown preset: $key"; return 1 ;;
+    esac
+
     clear; print_banner
-    print_step "Download from Hugging Face (Advanced)"
+    print_step "Download ${name} (Hugging Face)"
+    hf_choose_quant
+    local gguf
+    if ! gguf=$(hf_preset_filename "$key" "$HF_QUANT"); then
+        print_warn "Quant $HF_QUANT is not published for ${name}; falling back to Q4_K_M"
+        HF_QUANT="Q4_K_M"; gguf=$(hf_preset_filename "$key" "Q4_K_M")
+    fi
+
+    echo ""
+    print_info "Repo:     $repo"
+    print_info "File:     $gguf"
+    print_info "Name:     $name"
+    print_info "Engine:   RENDERER/PARSER ${rspec} (Ollama built-in)"
+    if ! ollama_version_at_least "$minver"; then
+        print_warn "${name} tools need Ollama >= ${minver}. If tools don't appear in 5ire, update via Maintenance [6] -> [1]."
+    fi
+    echo ""
+    hf_build_model "$repo" "$gguf" "$name" "renderer:${rspec}" "no"
+    read_input "${CYAN}Press Enter to continue... ${NC}" dummy
+}
+
+# ---------- Custom downloader: any repo/file, with template + mmproj detection ----------
+download_hf_custom() {
+    clear; print_banner
+    print_step "Download from Hugging Face (Custom)"
     echo -e "${BLUE}Browse GGUF models at: https://huggingface.co/models?library=gguf${NC}"
     echo ""
-    echo -e "${YELLOW}⚠️  IMPORTANT NOTES:${NC}"
+    echo -e "${YELLOW}⚠️  NOTES:${NC}"
     echo "  • Repo format: 'organization/model-name' (e.g., Qwen/Qwen3-4B-GGUF)"
     echo "  • Filename must end with .gguf"
     echo "  • For vision models, mmproj file will be auto-detected"
     echo ""
-    
+
     read_input "${CYAN}Hugging Face Repo: ${NC}" hf_repo
     read_input "${CYAN}GGUF Filename: ${NC}" hf_file
     read_input "${CYAN}Desired Ollama model name: ${NC}" ollama_name
-    
+
     hf_repo=$(sanitize_input "$hf_repo")
     hf_file=$(sanitize_input "$hf_file")
     ollama_name=$(sanitize_input "$ollama_name")
-    
+
     if [[ ! "$hf_repo" =~ ^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$ ]]; then
         print_error "Invalid repo format. Use 'organization/model-name'"
         read_input "${CYAN}Press Enter to continue... ${NC}" dummy; return 1
@@ -377,64 +685,85 @@ download_from_huggingface() {
         print_error "Filename must end with .gguf"
         read_input "${CYAN}Press Enter to continue... ${NC}" dummy; return 1
     fi
-    if [[ ! "$ollama_name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
-        print_error "Model name can only contain letters, numbers, - and _"
+    if ! valid_model_ref "$ollama_name"; then
+        print_error "Invalid model name. Allowed: letters, numbers, . _ : / - (e.g. qwen2.5-custom)"
         read_input "${CYAN}Press Enter to continue... ${NC}" dummy; return 1
     fi
-    
-    mkdir -p "$MODELS_TEMP"
-    cd "$MODELS_TEMP" || { print_error "Cannot access $MODELS_TEMP (run option [1] first)"; read_input "${CYAN}Press Enter to continue... ${NC}" dummy; return 1; }
+    # Ollama stores model names lowercase; normalise to avoid create/remove mismatches.
+    local ollama_name_lc
+    ollama_name_lc=$(echo "$ollama_name" | tr '[:upper:]' '[:lower:]')
+    if [ "$ollama_name_lc" != "$ollama_name" ]; then
+        print_warn "Ollama lowercases model names: using '$ollama_name_lc'"
+        ollama_name="$ollama_name_lc"
+    fi
 
-    print_info "Downloading main GGUF file..."
-    if ! wget -q --show-progress "https://huggingface.co/$hf_repo/resolve/main/$hf_file"; then
-        print_error "Download failed. Verify repo and filename."
-        log "ERROR" "HF download failed: $hf_repo/$hf_file"
-        read_input "${CYAN}Press Enter to continue... ${NC}" dummy; return 1
-    fi
-    
-    local mmproj_file=""
-    local base_name="${hf_file%.gguf}"
-    print_info "Checking for vision projector (mmproj)..."
-    for candidate in "mmproj-${base_name}.gguf" "mmproj-${base_name}-f16.gguf" "mmproj-${base_name}-F16.gguf" "mmproj-model-f16.gguf"; do
-        # -L follows HF's redirect to the CDN; match the HTTP/1.x or HTTP/2 200 status line.
-        if curl -sIL "https://huggingface.co/$hf_repo/resolve/main/$candidate" | grep -qiE "^HTTP/.* 200"; then
-            mmproj_file="$candidate"
-            break
-        fi
-    done
-    
-    if [ -n "$mmproj_file" ]; then
-        print_success "Vision projector detected: $mmproj_file"
-        wget -q --show-progress "https://huggingface.co/$hf_repo/resolve/main/$mmproj_file"
-    else
-        print_warn "No mmproj file found (text-only model)"
-    fi
-    
-    print_info "Generating Modelfile..."
-    # Note: the prompt template is intentionally omitted so Ollama can infer the
-    # correct chat template from the GGUF metadata (works for Llama/Qwen/Gemma/Phi...).
-    {
-        echo "FROM ./$hf_file"
-        [ -n "$mmproj_file" ] && echo "FROM ./$mmproj_file"
-        echo 'PARAMETER temperature 0.7'
-        echo 'PARAMETER top_p 0.8'
-        echo 'PARAMETER num_ctx 4096'
-    } > Modelfile
+    echo ""
+    echo -e "${YELLOW}Select a prompt template (affects MCP / tool-calling):${NC}"
+    echo -e "  ${GREEN}[1]${NC} Auto     — let Ollama pick from the GGUF (chat; tools only if embedded)"
+    echo -e "  ${GREEN}[2]${NC} ChatML   — tool-capable, for OLDER families (Qwen2.5 / Qwen3 ChatML GGUFs)"
+    echo -e "  ${GREEN}[3]${NC} Llama 3  — tool-capable (Llama 3.1 / 3.2)"
+    echo -e "  ${GREEN}[4]${NC} None     — text-only (no chat template)"
+    echo -e "  ${GREEN}[5]${NC} Built-in RENDERER/PARSER — for MODERN archs (Qwen3.5, DeepSeek,"
+    echo -e "             GLM, Gemma4...). ${CYAN}<= correct choice for Qwen3.5 tools${NC} (needs Ollama >= 0.17.1)"
+    read_input "${CYAN}Template [1-5] (default 1): ${NC}" tmpl_choice
+    local tmpl="auto"
+    case "$tmpl_choice" in
+        2) tmpl="chatml" ;;
+        3) tmpl="llama3" ;;
+        4) tmpl="none" ;;
+        5) echo -e "  ${YELLOW}Examples:${NC} qwen3.5 · ornith · deepseek3.1 · gemma4 · (LFM2.5 differs: renderer lfm2, parser lfm2-thinking)"
+           read_input "${CYAN}RENDERER name (e.g. qwen3.5): ${NC}" rp_name
+           read_input "${CYAN}PARSER name (Enter = same as renderer): ${NC}" pp_name
+           rp_name=$(sanitize_input "$rp_name"); pp_name=$(sanitize_input "$pp_name")
+           if [[ ! "$rp_name" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+               print_error "Invalid renderer name"; read_input "${CYAN}Press Enter to continue... ${NC}" dummy; return 1
+           fi
+           if [ -n "$pp_name" ]; then
+               if [[ ! "$pp_name" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+                   print_error "Invalid parser name"; read_input "${CYAN}Press Enter to continue... ${NC}" dummy; return 1
+               fi
+               tmpl="renderer:${rp_name},${pp_name}"
+           else
+               tmpl="renderer:${rp_name}"
+           fi ;;
+        *) tmpl="auto" ;;
+    esac
 
-    ensure_ollama_running || { read_input "${CYAN}Press Enter to continue... ${NC}" dummy; return 1; }
-    
-    print_info "Building model in Ollama..."
-    if su - "$REAL_USER" -c "export OLLAMA_MODELS=$OLLAMA_MODELS_DIR && ollama create $ollama_name -f $MODELS_TEMP/Modelfile"; then
-        print_success "Model '$ollama_name' created successfully"
-        log "INFO" "Custom model created: $ollama_name"
-    else
-        print_error "Model build failed. Check Modelfile syntax."
-        log "ERROR" "Model build failed: $ollama_name"
+    if [ "$tmpl" != "chatml" ] && [ "$tmpl" != "llama3" ] && [ "$tmpl" != "none" ] && ! ollama_version_at_least "0.17.1"; then
+        print_warn "Built-in renderer/parser needs Ollama >= 0.17.1. Update via menu option [6] -> [1] if tools don't appear."
     fi
-    
-    print_info "Cleaning up temporary files..."
-    rm -f "$hf_file" "$mmproj_file" Modelfile
+
+    hf_build_model "$hf_repo" "$hf_file" "$ollama_name" "$tmpl" "yes"
     read_input "${CYAN}Press Enter to continue... ${NC}" dummy
+}
+
+# ---------- Hugging Face menu (dispatcher) ----------
+download_from_huggingface() {
+    while true; do
+        clear; print_banner
+        echo -e "${CYAN}┌─────────────────────────────────────────────────────────────┐${NC}"
+        echo -e "${CYAN}│${BOLD}  DOWNLOAD FROM HUGGING FACE                                  ${CYAN}│${NC}"
+        echo -e "${CYAN}├─────────────────────────────────────────────────────────────┤${NC}"
+        echo -e "${CYAN}│${NC}  ${BOLD}Presets (tool-capable, built-in engine):${NC}                    ${CYAN}│${NC}"
+        echo -e "${CYAN}│${NC}  ${GREEN}[1]${NC} Qwen3.5-4B    (Q4_K_M ~2.5GB) — for 6GB VRAM          ${CYAN}│${NC}"
+        echo -e "${CYAN}│${NC}  ${GREEN}[2]${NC} Qwen3.5-9B    (Q4_K_M ~5.5GB) — for 8GB+ VRAM         ${CYAN}│${NC}"
+        echo -e "${CYAN}│${NC}  ${GREEN}[3]${NC} Ornith-1.0-9B (Q4_K_M ~5.5GB) — for 8GB+ VRAM         ${CYAN}│${NC}"
+        echo -e "${CYAN}│${NC}  ${GREEN}[4]${NC} LFM2.5-8B-A1B (MoE, fast — needs Ollama >= 0.30)      ${CYAN}│${NC}"
+        echo -e "${CYAN}│${NC}  ${GREEN}[5]${NC} Custom (enter repo + filename)                        ${CYAN}│${NC}"
+        echo -e "${CYAN}│${NC}  ${RED}[0]${NC} Back                                                  ${CYAN}│${NC}"
+        echo -e "${CYAN}└─────────────────────────────────────────────────────────────┘${NC}"
+        echo ""
+        read_input "${CYAN}Select option [0-5]: ${NC}" hf_choice
+        case "$hf_choice" in
+            0) return 0 ;;
+            1) download_hf_preset "qwen3.5-4b" ;;
+            2) download_hf_preset "qwen3.5-9b" ;;
+            3) download_hf_preset "ornith-9b" ;;
+            4) download_hf_preset "lfm2.5-8b" ;;
+            5) download_hf_custom ;;
+            *) print_error "Invalid option"; sleep 1 ;;
+        esac
+    done
 }
 
 list_installed_models() {
@@ -591,6 +920,9 @@ EOF
     systemctl daemon-reload
     systemctl enable --now kali-mcp-api.service
 
+    # Fix the known Kali-package regression that breaks /api/tools/* endpoints.
+    repair_mcp_server
+
     sleep 3
     if curl -s http://127.0.0.1:5000/health > /dev/null 2>&1; then
         print_success "MCP Flask API is running successfully on port 5000!"
@@ -615,6 +947,95 @@ EOF
     echo -e "${CYAN}└─────────────────────────────────────────────────────────────┘${NC}"
     echo ""
     read_input "${CYAN}Press Enter to continue... ${NC}" dummy
+}
+
+# ==============================================================================
+# PHASE 6b: REPAIR MCP SERVER (fix Kali package's broken /api/tools/* endpoints)
+# ==============================================================================
+# The Kali 'mcp-kali-server' package ships a botched "remove-shell-true" patch that
+#   (a) adds a guard rejecting non-string commands -> every /api/tools/* endpoint
+#       (nmap, dirb, gobuster, ...) sends an argv list and gets HTTP 500, and
+#   (b) computes cmd_args = shlex.split(...) but never uses it, so shell=True is
+#       actually still active (the patch's own security goal fails).
+# This function rewrites CommandExecutor.execute() to accept both str and list and
+# to always run WITHOUT a shell. Idempotent, keeps a .bak, safe if the file differs.
+repair_mcp_server() {
+    print_step "Repair / Patch MCP Server (Kali package fix)"
+    local server_py="/usr/share/mcp-kali-server/server.py"
+    if [ ! -f "$server_py" ]; then
+        print_error "$server_py not found. Install the MCP server first (option [5])."
+        return 1
+    fi
+    if ! command -v python3 &> /dev/null; then
+        print_error "python3 not found; cannot patch."
+        return 1
+    fi
+
+    [ -f "${server_py}.bak" ] || cp -a "$server_py" "${server_py}.bak"
+
+    local result
+    result=$(python3 - "$server_py" << 'PYEOF'
+import sys
+p = sys.argv[1]
+MARK = "Patched by Kali_LLM installer"
+try:
+    s = open(p, encoding="utf-8").read()
+except Exception:
+    print("ERR_READ"); sys.exit(0)
+
+if MARK in s:
+    print("ALREADY"); sys.exit(0)
+if "CommandExecutor expects a string" not in s:
+    print("UNKNOWN"); sys.exit(0)
+
+s = s.replace(
+"""        if not isinstance(self.command, str):
+            raise ValueError(f"CommandExecutor expects a string, but got {type(self.command).__name__}")
+
+        cmd_args = shlex.split(self.command)
+""",
+"""        # Patched by Kali_LLM installer: accept str (shell string) or list (argv);
+        # always run WITHOUT a shell for safety.
+        cmd_args = shlex.split(self.command) if isinstance(self.command, str) else self.command
+""")
+s = s.replace(
+"""                self.command,
+                shell=self.use_shell,""",
+"""                cmd_args,
+                shell=False,""")
+
+if "shell=self.use_shell" in s or "expects a string" in s or MARK not in s:
+    print("ERR_PATTERN"); sys.exit(0)
+
+try:
+    compile(s, p, "exec")
+except SyntaxError:
+    print("ERR_SYNTAX"); sys.exit(0)
+
+open(p, "w", encoding="utf-8").write(s)
+print("PATCHED")
+PYEOF
+)
+
+    case "$result" in
+        PATCHED)
+            print_success "server.py patched: tool endpoints fixed + shell disabled"
+            log "INFO" "mcp-kali-server server.py patched"
+            if systemctl restart kali-mcp-api.service 2>/dev/null; then
+                print_success "kali-mcp-api.service restarted"
+            else
+                print_warn "Patched, but could not restart kali-mcp-api.service"
+            fi
+            ;;
+        ALREADY)  print_success "server.py already patched — nothing to do" ;;
+        UNKNOWN)  print_warn "server.py doesn't match the known buggy version; left unchanged (maybe already fixed upstream)" ;;
+        ERR_READ) print_error "Could not read $server_py (permissions?)" ;;
+        ERR_PATTERN|ERR_SYNTAX)
+            print_error "Patch aborted safely; restoring backup"
+            cp -a "${server_py}.bak" "$server_py" 2>/dev/null
+            ;;
+        *) print_error "Unexpected patch result: $result" ;;
+    esac
 }
 
 # ==============================================================================
@@ -652,9 +1073,13 @@ update_tools() {
         print_warn "Ollama not installed; skipping (use menu option [2])"
     fi
 
-    # --- 3. mcp-kali-server (via apt, already covered by full-upgrade) ---
+    # --- 3. mcp-kali-server (apt-managed) + re-apply our patch ---
+    # server.py lives in /usr/share (NOT a dpkg conffile), so any package upgrade
+    # silently overwrites it with the buggy version. Re-run the repair to be safe.
     if dpkg -s mcp-kali-server &> /dev/null; then
         print_success "mcp-kali-server is managed by apt (upgraded above)"
+        print_info "Re-applying MCP tool-endpoint patch (upgrade may have reverted it)..."
+        repair_mcp_server
     else
         print_warn "mcp-kali-server not installed; skipping (use menu option [5])"
     fi
@@ -767,6 +1192,32 @@ manage_services() {
 }
 
 # ==============================================================================
+# MAINTENANCE MENU (Update + Services + Repair)
+# ==============================================================================
+maintenance_menu() {
+    while true; do
+        clear; print_banner
+        echo -e "${CYAN}┌─────────────────────────────────────────────────────────────┐${NC}"
+        echo -e "${CYAN}│${BOLD}  MAINTENANCE                                                 ${CYAN}│${NC}"
+        echo -e "${CYAN}├─────────────────────────────────────────────────────────────┤${NC}"
+        echo -e "${CYAN}│${NC}  ${GREEN}[1]${NC} Update Tools (System + Ollama + 5ire)                  ${CYAN}│${NC}"
+        echo -e "${CYAN}│${NC}  ${GREEN}[2]${NC} Manage Services (MCP API + Ollama)                     ${CYAN}│${NC}"
+        echo -e "${CYAN}│${NC}  ${GREEN}[3]${NC} Repair MCP Server (fix tool endpoints)                 ${CYAN}│${NC}"
+        echo -e "${CYAN}│${NC}  ${RED}[0]${NC} Back to Main Menu                                      ${CYAN}│${NC}"
+        echo -e "${CYAN}└─────────────────────────────────────────────────────────────┘${NC}"
+        echo ""
+        read_input "${CYAN}Select option [0-3]: ${NC}" maint_choice
+        case "$maint_choice" in
+            0) return 0 ;;
+            1) update_tools ;;
+            2) manage_services ;;
+            3) repair_mcp_server; read_input "${CYAN}Press Enter to continue... ${NC}" dummy ;;
+            *) print_error "Invalid option"; sleep 1 ;;
+        esac
+    done
+}
+
+# ==============================================================================
 # MAIN MENU
 # ==============================================================================
 main_menu() {
@@ -780,12 +1231,11 @@ main_menu() {
         echo -e "${CYAN}│${NC}  ${GREEN}[3]${NC} Download & Manage Models                               ${CYAN}│${NC}"
         echo -e "${CYAN}│${NC}  ${GREEN}[4]${NC} Install 5ire Application                               ${CYAN}│${NC}"
         echo -e "${CYAN}│${NC}  ${GREEN}[5]${NC} Install & Configure MCP Server (Kali Tools)            ${CYAN}│${NC}"
-        echo -e "${CYAN}│${NC}  ${GREEN}[6]${NC} Update Tools (System + Ollama + 5ire)                  ${CYAN}│${NC}"
-        echo -e "${CYAN}│${NC}  ${GREEN}[7]${NC} Manage Services (MCP API + Ollama)                     ${CYAN}│${NC}"
+        echo -e "${CYAN}│${NC}  ${GREEN}[6]${NC} Maintenance (Update · Services · Repair)               ${CYAN}│${NC}"
         echo -e "${CYAN}│${NC}  ${RED}[0]${NC} Exit Script                                            ${CYAN}│${NC}"
         echo -e "${CYAN}└─────────────────────────────────────────────────────────────┘${NC}"
         echo ""
-        read_input "${CYAN}Select option [0-7]: ${NC}" choice
+        read_input "${CYAN}Select option [0-6]: ${NC}" choice
 
         case $choice in
             0) echo -e "${GREEN}Thank you for using Kali LLM Installer!${NC}"; log "INFO" "Exited cleanly"; exit 0 ;;
@@ -794,8 +1244,7 @@ main_menu() {
             3) download_models ;;
             4) install_5ire ;;
             5) install_mcp_server ;;
-            6) update_tools ;;
-            7) manage_services ;;
+            6) maintenance_menu ;;
             *) print_error "Invalid option"; sleep 1 ;;
         esac
     done
