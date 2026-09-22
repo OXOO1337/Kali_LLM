@@ -41,7 +41,7 @@ The script brings together:
 
 - 🎛️ **Interactive menu** with a live status dashboard (OS, RAM, GPU, service status, storage usage).
 - 🗂️ **Isolated `/srv` layout** — models and binaries kept away from the base filesystem.
-- 📦 **Full model management** — pull from the Ollama library, or build GGUF models from Hugging Face via a submenu: one-click **Qwen3.5-4B / 9B presets**, a **quantization chooser** (Q4_K_M → BF16), a **template / tool-engine selector** (Auto · ChatML · Llama 3 · **built-in RENDERER/PARSER** for modern archs like Qwen3.5), and automatic `mmproj` vision-projector detection.
+- 📦 **Full model management** — pull from the Ollama library, or build GGUF models from Hugging Face via a submenu: one-click **tool-ready presets** (Qwen3.5-4B/9B, Ornith-1.0-9B, LFM2.5-8B-A1B), a **quantization chooser** (Q4_K_M → BF16), a **template / tool-engine selector** (Auto · ChatML · Llama 3 · **built-in RENDERER/PARSER** for modern archs), and automatic `mmproj` vision-projector detection.
 - 🧰 **Maintenance menu** — one place for updates, service control, and the MCP repair.
 - 🩹 **MCP server repair** — auto-fixes a bug in the Kali `mcp-kali-server` package that breaks every tool endpoint (see [MCP Server Repair](#-mcp-server-repair)).
 - 🛡️ **Safe input** — sanitization and strict allow-lists to prevent command injection.
@@ -108,8 +108,8 @@ sudo ./Kali_LLM.sh
 
 Option `[3]` supports:
 
-1. **Pull from the Ollama library** (recommended) — Tools-capable models:
-   - `qwen2.5:7b`, `qwen2.5:3b`, `mistral-nemo`
+1. **Pull from the Ollama library** (recommended — tools work out of the box):
+   - `qwen3.5:4b`, `qwen3.5:9b`, `ornith:9b`, `lfm2.5:8b`
    - `llama3.1:8b`, `llama3.2:3b`, `qwen3:4b` *(from the official guide)*
 2. **Build from Hugging Face (GGUF)** — opens a submenu of one-click, tool-capable presets (built-in RENDERER/PARSER) plus a custom builder:
    - `[1] Qwen3.5-4B` — `unsloth/Qwen3.5-4B-GGUF` · engine `qwen3.5` · ~6 GB VRAM · Ollama ≥ 0.17.1
@@ -118,16 +118,14 @@ Option `[3]` supports:
    - `[4] LFM2.5-8B-A1B` — `unsloth/LFM2.5-8B-A1B-GGUF` · MoE · engine `lfm2` / parser `lfm2-thinking` · Ollama ≥ 0.30.0
    - `[5] Custom` — enter any `repo`, `filename.gguf`, and model name, pick a template/engine, with automatic `mmproj` vision-projector detection
 
-   The presets and custom builds both let you choose:
-   - **Quantization** — `Q4_K_M` (default) · `Q5_K_M` · `Q6_K` · `Q8_0` · `Q3_K_M` · `BF16`
-   - **Template / tool engine**:
-     - `[1] Auto` — Ollama picks from the GGUF (chat; tools only if embedded)
-     - `[2] ChatML` — tool-capable, for **older** families (Qwen2.5 / Qwen3 ChatML GGUFs)
-     - `[3] Llama 3` — tool-capable (Llama 3.1 / 3.2)
-     - `[4] None` — text-only
-     - `[5] Built-in RENDERER/PARSER` — for **modern** archs (Qwen3.5, DeepSeek, GLM, Gemma4…); prompts for the name (e.g. `qwen3.5`). Needs Ollama ≥ 0.17.1.
+   Every preset lets you choose a **Quantization** (`Q4_K_M` default · `Q5_K_M` · `Q6_K` · `Q8_0` · `Q3_K_M` · `BF16`); availability varies per repo (e.g. Ornith has no `Q3_K_M` and falls back to `Q4_K_M`). The four presets already set the correct tool engine automatically. The **Custom** builder additionally asks you to pick the template / tool engine:
+   - `[1] Auto` — Ollama picks from the GGUF (chat; tools only if embedded)
+   - `[2] ChatML` — tool-capable, for **older** families (Qwen2.5 / Qwen3 ChatML GGUFs)
+   - `[3] Llama 3` — tool-capable (Llama 3.1 / 3.2)
+   - `[4] None` — text-only
+   - `[5] Built-in RENDERER/PARSER` — for **modern** archs (Qwen3.5, Ornith, LFM2.5, DeepSeek, GLM…); asks for the **renderer** name then the **parser** name (press Enter to reuse the renderer). Needs a recent Ollama (≥ 0.17.1 for Qwen3.5; ≥ 0.30 for Ornith / LFM2.5).
 
-   > ⚠️ **Tool-calling depends on the runtime, not just the model.** See [How tool-calling works](#-how-tool-calling-works-important) below. For **Qwen3.5** choose option `[5]` and enter `qwen3.5` (the Qwen3.5 presets do this automatically).
+   > ⚠️ **Tool-calling depends on the runtime, not just the model.** See [How tool-calling works](#-how-tool-calling-works-important) below. For the four presets it is handled for you; for any other modern-arch GGUF use **Custom** → template `[5]` and enter its engine name.
 3. **List installed models** + disk usage.
 4. **Remove a model**.
 
@@ -251,7 +249,7 @@ dpkg -s mcp-kali-server | grep -i version
 - **5ire won't launch**: the launcher uses `--appimage-extract-and-run`; ensure `libfuse2t64` is installed.
 - **Chat works but tool-calling / MCP does nothing** — two possible causes:
   1. **Server side**: the Kali `mcp-kali-server` package bug (tool endpoints return HTTP 500). Run **Maintenance `[6] → [3]` Repair MCP Server** — see [MCP Server Repair](#-mcp-server-repair).
-  2. **Model side** (HF GGUF models): the model was imported without a working tool engine. For **Qwen3.5 and other modern archs**, re-import via `[3] → [2]` and pick template **`[5]` Built-in RENDERER/PARSER** (enter `qwen3.5`); for older families pick `ChatML` / `Llama 3`. Then verify: `ollama show <model>` lists `tools` (a Qwen3.5 import also shows `requires 0.17.1`), and the MCP log shows `POST /api/tools/... 200`. See [How tool-calling works](#-how-tool-calling-works-important).
+  2. **Model side** (HF GGUF models): the model was imported without a working tool engine. Easiest fix: re-download it with a **preset** (`[3] → [1..4]`), which sets the engine for you. For any other modern-arch GGUF, use **`[3] → [5] Custom`** and pick template **`[5]` Built-in RENDERER/PARSER** (enter its engine name); for older families pick `ChatML` / `Llama 3`. Then verify: `ollama show <model>` lists `tools` and shows a `requires <ver>` line, and the MCP log shows `POST /api/tools/... 200`. See [How tool-calling works](#-how-tool-calling-works-important).
 
 ---
 
